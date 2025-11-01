@@ -37,7 +37,6 @@ The installation of R and the required packages typically takes less than 30 min
 Repository Structure
 The repository is organized into the following main folders:
 
-Project Structure
 ### data/
 Contains datasets used in the analysis
 
