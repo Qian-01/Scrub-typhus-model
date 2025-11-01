@@ -100,9 +100,74 @@ rf_weight_nobio <- ranger(
   importance = 'impurity',
   case.weights = df_balanced$weight
 )
-  
 # Save model
 saveRDS(rf_weight_nobio, "rf_weight_nobio.rds")
 
 #predict
+library(raster)
+library(dplyr)
+library(sf)
+library(data.table)
+library(ranger)
+library(parallel)
+library(doParallel)
+library(foreach)
+#read scaled stack raster dataframe
+predict_data<-readRDS("predict_scaled_covariates_2020.rds")
+
+library(parallel)
+n_cores <- 10  
+cl <- makeCluster(n_cores)
+predict_data$.__index__ <- 1:nrow(predict_data) 
+
+chunk_size <- ceiling(nrow(predict_data) / 600)
+data_chunks <- list()
+for (i in 1:600) {
+  start_idx <- (i-1) * chunk_size + 1
+  end_idx <- min(i * chunk_size, nrow(predict_data))
+  data_chunks[[i]] <- predict_data[start_idx:end_idx, ]
+}
+# Create progress file
+progress_file <- "progress.txt"
+if (file.exists(progress_file)) file.remove(progress_file)
+
+predict_chunk <- function(chunk) {
+  progress_msg <- paste("Processing chunk with indices from", min(chunk$.__index__), 
+                        "to", max(chunk$.__index__), "at", Sys.time())
+  cat(progress_msg, "\n", file = "progress.txt", append = TRUE)
+  
+  na_rows <- apply(chunk, 1, function(x) any(is.na(x)))
+  
+  predictions <- rep(NA, nrow(chunk))
+  se.fit <- rep(NA, nrow(chunk))
+  
+  if (any(!na_rows)) {
+    valid_predictions <- predict(rf.fit, chunk[!na_rows,], type = "response")
+    predictions[!na_rows] <- valid_predictions$predictions[, 2]
+    #se.fit[!na_rows] <- valid_predictions[[6]][,2]
+  }
+  # Write completion to file
+  completion_msg <- paste("Completed chunk", min(chunk$.__index__), "-", 
+                          max(chunk$.__index__), "at", Sys.time())
+  cat(completion_msg, "\n", file = "progress.txt", append = TRUE)
+  gc() 
+  return(data.frame(index = chunk$.__index__, prob = predictions))
+}
+
+clusterExport(cl, varlist = c("rf_weight_nobio", "predict_chunk"))
+clusterEvalQ(cl, library(ranger)) 
+
+result <- parLapply(cl, data_chunks, predict_chunk)
+
+stopCluster(cl)
+gc()
+
+RF_predictions <- unlist(lapply(result, function(x) x$prob))
+
+template_raster <- raster("annual_prec_2020.tif")
+RF_raster <- template_raster
+values(RF_raster) <- RF_predictions
+
+writeRaster(RF_raster, filename = "RF_pred_nobio_weight.tif", format = "GTiff", overwrite = TRUE)
+#writeRaster(se_raster, filename = "RF_pred_nobio_weight_se.tif", format = "GTiff", overwrite = TRUE)
 
