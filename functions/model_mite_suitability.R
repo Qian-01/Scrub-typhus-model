@@ -557,3 +557,110 @@ if (nrow(cutoff_per_model) > 0) {
 
 cat("\nAll PDP plots, ROC curves, model RDS files, variable importance tables, and accuracy tables saved to", output_dir, "\n")
 cat("\n1x negative sampling analysis completed.\n")
+
+# --------------------predict mite suitablity--------------------
+# -------------------- 0. Load Packages --------------------
+library(raster)
+library(gbm)
+library(tools)
+
+# Clear memory
+cat("Clearing memory...\n")
+rm(list = ls())
+gc()
+cat("Memory cleared.\n")
+
+# -------------------- 1. Paths --------------------
+model_folder <- "./outputs/model_results/"
+predictor_dir <- "./data/raster_data/env_tif/"
+output_path <- file.path(model_folder, "BRT_prediction_average_models.tif")
+
+# Create output directory
+dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+
+# -------------------- 2. Load Model Files --------------------
+model_files <- list.files(model_folder, pattern = "\\.rds$", full.names = TRUE)
+if (length(model_files) == 0) stop("No .rds files found in model folder: ", model_folder)
+cat("Found", length(model_files), "model files\n")
+
+# Load first model to get variable names
+cat("Loading first model to retrieve variable names...\n")
+model1 <- readRDS(model_files[1])
+model_vars <- model1$var.names
+cat("Model variables:\n")
+print(model_vars)
+
+# -------------------- 3. Load and Prepare Raster Data --------------------
+# Get all .tif files and standardize names
+all_files <- list.files(predictor_dir, pattern = "\\.tif$", full.names = TRUE)
+file_names <- file_path_sans_ext(basename(all_files))
+standard_names <- gsub("['']", "", file_names)
+standard_names <- gsub(" ", ".", standard_names)
+names(all_files) <- standard_names
+
+# Check for missing variables
+missing_vars <- setdiff(model_vars, names(all_files))
+if (length(missing_vars) > 0) {
+  stop("Missing .tif files for variables: ", paste(missing_vars, collapse = ", "))
+}
+
+# Build RasterStack
+cat("Building environmental variable RasterStack...\n")
+raster_list <- lapply(model_vars, function(v) raster(all_files[[v]]))
+env_stack <- stack(raster_list)
+names(env_stack) <- model_vars
+
+# Ensure consistent raster properties
+cat("Ensuring consistent raster extent, resolution, and projection...\n")
+reference_raster <- raster_list[[1]]
+for (i in seq_along(raster_list)) {
+  if (!compareRaster(reference_raster, raster_list[[i]], extent = TRUE, rowcol = TRUE, crs = TRUE, stopiffalse = FALSE)) {
+    cat("Raster", names(raster_list)[i], "inconsistent, resampling...\n")
+    raster_list[[i]] <- projectRaster(raster_list[[i]], reference_raster, method = "bilinear")
+  }
+}
+env_stack <- stack(raster_list)
+names(env_stack) <- model_vars
+
+# -------------------- 4. Predict and Average --------------------
+sum_raster <- raster(env_stack[[1]])
+values(sum_raster) <- 0
+n_valid_models <- 0
+
+for (i in seq_along(model_files)) {
+  cat("Predicting with model", i, "/", length(model_files), ":", basename(model_files[i]), "\n")
+  
+  brt_model <- tryCatch({
+    readRDS(model_files[i])
+  }, error = function(e) {
+    cat("Warning: Failed to read model", model_files[i], ":", e$message, "\nSkipping...\n")
+    return(NULL)
+  })
+  if (is.null(brt_model)) next
+  
+  best_trees <- brt_model$n.trees %||% 1000
+  cat("Using", best_trees, "trees\n")
+  
+  pred_raster <- tryCatch({
+    predict(env_stack, model = brt_model, type = "response", n.trees = best_trees, progress = "text")
+  }, error = function(e) {
+    cat("Warning: Prediction failed for model", model_files[i], ":", e$message, "\nSkipping...\n")
+    return(NULL)
+  })
+  if (is.null(pred_raster)) next
+  
+  sum_raster <- sum_raster + pred_raster
+  n_valid_models <- n_valid_models + 1
+}
+
+# Check for valid predictions
+if (n_valid_models == 0) stop("No successful predictions, cannot generate average raster!")
+
+# Compute average probability
+cat("Calculating average probability from", n_valid_models, "models...\n")
+mean_raster <- sum_raster / n_valid_models
+
+# -------------------- 5. Save Output --------------------
+cat("Saving average prediction...\n")
+writeRaster(mean_raster, filename = output_path, format = "GTiff", overwrite = TRUE)
+cat("Successfully saved average prediction of", n_valid_models, "models to:", output_path, "\n")
