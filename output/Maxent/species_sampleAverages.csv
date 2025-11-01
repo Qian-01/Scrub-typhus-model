@@ -1,0 +1,18 @@
+Predictor variable,Categorical,Sample average
+EVI,false,3465.036425088414
+LD,false,0.6758219205732114
+LP,false,0.3853535649185042
+LS,false,0.6479013757162299
+NDVI,false,5761.654591376362
+cropland,false,7.452436685240374
+forest,false,16.234003677040985
+grassland,false,40.92588700593128
+maximum.temperature,false,22.822716033153256
+minimum.temperature,false,14.187001804914937
+precipitation,false,1327.9651205598482
+relative_humidity,false,74.22031772945115
+richness,false,14.733471770307053
+urban,false,26.76464411467724
+urban_accessibility_5km,false,197.14150268770328
+wc2.1_elevation_5km,false,457.6041186445643
+wind_speed,false,2.366292662309757
