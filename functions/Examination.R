@@ -5,7 +5,7 @@ library(readxl)
 library(broom)
 
 df <- read_excel("calculation of result.xlsx")
-df <- read_excel("E:/ES revision/human model with bio/orignial_humanoccurrence data/max mite/weighted es.xls", sheet = 1)
+df <- read_excel("weighted es.xls", sheet = 1)
 df_plot <- df %>%
   rename(
     country = Country
