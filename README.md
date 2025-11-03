@@ -35,67 +35,68 @@ The installation of R and the required packages typically takes less than 30 min
 ## **Instructions for Use**
 
 Repository Structure
-The repository is organized into the following main folders:
+The repository is organized into the following main three folders:
 
 ### data/
 Contains datasets used in the analysis
 
-- **population_ratio/**: Population ratios for population calculations
+- **population_ratio/**: Population information used for population calculations, including country-wise agriculatural ratio, elderly ratio, <15yrs ratio obtained from Worldbank.
 
-- **df_balanced.rds**: Main database for scrub typhus environmental suitability (30km buffer)
+- **df_balanced.rds**: Main database for scrub typhus environmental suitability, including presence data and equal amount of absence data with the corresponding coordinations, countries, data source, and values of 30 types of covariates.
 
-- **15_df_balanced.rds**: Database with 15km buffer distance
+- **15_df_balanced.rds**: Database used for sensitivity analysis when buffer distance for obtaining covariates value changed from 30 km to 15km.
 
-- **45_df_balanced.rds**: Database with 45km buffer distance
+- **45_df_balanced.rds**: Database used for sensitivity analysis when buffer distance for obtaining covariates value changed from 30 km to 45km. 
 
-Data Preparation Scripts:
-- **data_preparation.R**: Generates df_balanced.rds from raw data
+Data Preparation Scripts
+- **data_preparation.R**: R code to generate df_balanced.rds from raw data.
 
-- **data_for_sensitivity_analysis.R**: Prepares base data for sensitivity analysis
+- **data_for_sensitivity_analysis.R**: R code to generate base data for sensitivity analysis from raw data.
 
-- **data_for_prediction.R**: Generates prediction data from raw data
+- **data_for_prediction.R**: R code to generate covaraites data for prediction from raw data.
 
 ### scripts/
 Contains all analysis code and scripts
 
 **Core Modeling**:
-- **weight_mite.R**: Generates weights for mite species suitability modeling
+- **weight_mite.R**: R code to generate weights for mite species suitability modeling
 
-- **weight_scrub_typhus.R**: Generates weights for scrub typhus environmental suitability
+- **weight_scrub_typhus.R**: R code to generate weights for scrub typhus environmental suitability.
 
-- **model_mite_suitability.R**: Models key mite species suitability
+- **model_mite_suitability.R**: R code to model key mite species suitability.
 
-- **RandomForest.R**: Main RandomForest model for environmental suitability
+- **RandomForest.R**: R code of main RandomForest model for environmental suitability
 
-- **Maxent.R**: Maxent method implementation
+- **Maxent.R**: R code of Maxent method implementation.
 
 **Model Comparison & Validation**:
-- **model_comparison_GAM_GLM_BRT_RF.R**: Compares GLM, GAM, BRT, RF performance using spatial block cross-validation
+- **model_comparison_GAM_GLM_BRT_RF.R**: R code to compare GLM, GAM, BRT, RF performance using spatial block cross-validation.
 
-- **spatial_block_cv.R**: Spatial block cross-validation functions
+- **spatial_block_cv.R**: R code of spatial block cross-validation function.
 
-- **MOP.R**: Generates Mobility-Oriented Parity (MOP) metric for extrapolation analysis
+- **MOP.R**: R code to generate Mobility-Oriented Parity (MOP) metric for extrapolation analysis.
 
 **Uncertainty & Sensitivity Analysis**:
-- **Uncertainty_100fold.R**: Uncertainty analysis using 100-fold bootstrap
+- **Uncertainty_100fold.R**: R code for uncertainty analysis using 100-fold bootstrap method.
 
-- **Uncertainty_10spatial_block_fold.R**: Uncertainty analysis using 10 spatial block folds
+- **Uncertainty_10spatial_block_fold.R**: R code for uncertainty analysis using 10 spatial block folds method.
 
-- **sensitivity_analysis.R**: Conducts sensitivity analysis
+- **sensitivity_analysis.R**: R code to conduct sensitivity analysis.
 
 **Results Examination**:
-- **Examination.R**: Compares population-weighted environmental suitability with reported incidence (generates Figure 3)
+- **Examination.R**: R code to compare population-weighted environmental suitability with reported incidence and generate Figure 3.
 
 ### outputs/
 Contains analysis results
 
-- **spatial_block_cv/**: Spatial block cross-validation results
+- **spatial_block_cv/**: Spatial block cross-validation results for the final RandomForest model.
 
-- **weight/**: Weight results from modeling process
+- **weight/**: Weight results from modeling process.
 
-- **model_comparison/**: Results comparing different models
+- **model_comparison/**: Results comparing different models.
 
-- **Maxent/**: Results from Maxent model
+- **Maxent/**: Results from Maxent model.
 
+#### Due to file size limitations, all raster files (including covariates and the main outcome used for prediction) are not included in this repository. These files can be made available upon request by contacting qian@tropmedres.ac)
 
 For additional details, refer to the main manuscript and supplementary documentation provided.
