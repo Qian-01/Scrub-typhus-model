@@ -97,6 +97,8 @@ Contains analysis results
 
 - **Maxent/**: Results from Maxent model.
 
-#### Due to file size limitations, all raster files (including covariates and the main outcome used for prediction) are not included in this repository. These files can be made available upon request by contacting qian@tropmedres.ac)
+- **mainresult.markdown/**: Contains the main raster results available for download.
+
+#### Due to file size limitations, all covariates raster files are not included in this repository. These files can be made available upon request by contacting qian@tropmedres.ac.
 
 For additional details, refer to the main manuscript and supplementary documentation provided.
