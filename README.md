@@ -77,7 +77,7 @@ Contains all analysis code and scripts
 - **MOP.R**: R code to generate Mobility-Oriented Parity (MOP) metric for extrapolation analysis.
 
 **Uncertainty & Sensitivity Analysis**:
-- **Uncertainty_100fold.R**: R code for uncertainty analysis using 100-fold bootstrap method.
+- **Uncertainty_100fold.R**: R code for uncertainty analysis using 100-fold clustered bootstrap method.
 
 - **Uncertainty_10spatial_block_fold.R**: R code for uncertainty analysis using 10 spatial block folds method.
 
