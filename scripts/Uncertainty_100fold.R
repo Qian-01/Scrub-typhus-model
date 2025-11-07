@@ -1,189 +1,240 @@
 
-# Load required libraries
-library(raster)
-library(dplyr)
-library(sf)
-library(data.table)
-library(ranger)
-library(parallel)
-library(doParallel)
-library(foreach)
+rm(list = ls()); gc()
 
-df <- read.csv("humanoccurrence.csv")
-df <- df %>% 
-  rename(
-    Water_bodies = land1, 
-    Evergreen_Needleleaf_Forests = land2, 
-    Evergreen_Broadleaf_Forests = land3,
-    Deciduous_Needleleaf_Forests = land4,
-    Deciduous_Broadleaf_Forests = land5,
-    Mixed_Forests = land6,
-    Closed_Shrublands = land7,
-    Open_Shrublands = land8,
-    Woody_Savannas = land9,
-    Savannas = land10,
-    Grasslands = land11,
-    Permanent_Wetlands = land12,
-    Croplands = land13,
-    Urban_and_Builtup = land14,
-    Cropland_Natural_Vegetation_Mosaics = land15,
-    Snow_and_Ice = land16,
-    Barren_or_Sparsely_Vegetated = land17
-  )
-df$mite<-pmax(df$ld_mean,df$ls_mean,df$lp_mean, na.rm = T)
-
-#re-scale first
-predictors_names<- c("Water_bodies", "Evergreen_Needleleaf_Forests", "Evergreen_Broadleaf_Forests",
-                     "Deciduous_Needleleaf_Forests","Deciduous_Broadleaf_Forests","Mixed_Forests",
-                     "Closed_Shrublands","Open_Shrublands","Woody_Savannas",
-                     "Savannas","Grasslands","Permanent_Wetlands",
-                     "Croplands","Urban_and_Builtup","Cropland_Natural_Vegetation_Mosaics",
-                     "Snow_and_Ice","Barren_or_Sparsely_Vegetated","ndvi","evi", "pop", "prec", 
-                     "tmin", "tmax", "sp","ws","rh", "elevation", "urban_acc_30s",
-                     "mite","rodent_richness")
-numeric_cols <- predictors_names[sapply(df[, predictors_names], is.numeric)]
-scaling_params <- lapply(df[, numeric_cols], function(x) {
-  list(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE))
+suppressPackageStartupMessages({
+  library(raster)
+  library(dplyr)
+  library(sf)
+  library(data.table)
+  library(ranger)
+  library(purrr)
 })
 
-df[, numeric_cols] <- lapply(df[, numeric_cols], scale, center = TRUE, scale = TRUE)
+# ---------------- load data ----------------
+DF_RDS   <- "df_with_clusters.rds"
+PRED_RDS <- "predict_scaled_covariates_2020.rds"
+TPL_TIF  <- "annual_prec_2020.tif"
 
-df <- df[complete.cases(df[, predictors_names]), ]
+rasterOptions(overwrite = TRUE)  
 
-# Read scaled stack raster dataframe
-predict_data <- readRDS("predict_scaled_covariates_2020.rds")
+df <- readRDS(DF_RDS)
+predict_data <- readRDS(PRED_RDS)
+template_raster <- raster(TPL_TIF)
 
-# Separate occurrence data
-df_0 <- df %>% filter(occurrence == 0)
-df_1 <- df %>% filter(occurrence == 1)
+predictors_names <- c(
+  "Water_bodies","Evergreen_Needleleaf_Forests","Evergreen_Broadleaf_Forests",
+  "Deciduous_Needleleaf_Forests","Deciduous_Broadleaf_Forests","Mixed_Forests",
+  "Closed_Shrublands","Open_Shrublands","Woody_Savannas",
+  "Savannas","Grasslands","Permanent_Wetlands",
+  "Croplands","Urban_and_Builtup","Cropland_Natural_Vegetation_Mosaics",
+  "Snow_and_Ice","Barren_or_Sparsely_Vegetated","ndvi","evi","pop","prec",
+  "tmin","tmax","sp","ws","rh","elevation","urban_acc_30s","mite","rodent_richness"
+)
 
-# Set up parallel processing
-n_cores <- 10
-cl <- makeCluster(n_cores)
+prediction_data_full <- as.data.frame(predict_data)[, predictors_names, drop = FALSE]
 
-# Prepare prediction data chunks (same as before)
-predict_data$.__index__ <- 1:nrow(predict_data)
-chunk_size <- ceiling(nrow(predict_data) / 600)
-data_chunks <- list()
-for (i in 1:600) {
-  start_idx <- (i-1) * chunk_size + 1
-  end_idx <- min(i * chunk_size, nrow(predict_data))
-  data_chunks[[i]] <- predict_data[start_idx:end_idx, ]
+# occurrence=0/1 
+df_0 <- dplyr::filter(df, occurrence %in% c(0, "0"))
+df_1 <- dplyr::filter(df, occurrence %in% c(1, "1"))
+cat("df_0 rows:", nrow(df_0), "| df_1 rows:", nrow(df_1), "\n")
+
+# ---------------- ----------------
+TOTAL_ITERS <- 100
+bootstrap_seeds <- 10000 + seq_len(TOTAL_ITERS)  
+
+existing <- list.files(pattern = "^RF_pred_bootstrap_\\d{3}\\.tif$")
+existing_idx <- as.integer(sub("^RF_pred_bootstrap_(\\d{3})\\.tif$", "\\1", existing))
+
+todo_idx <- setdiff(seq_len(TOTAL_ITERS), existing_idx)
+if (length(todo_idx) == 0) {
+  message("test all predictions are done")
+  quit(save = "no")
+}
+message("running following：", paste(sprintf("%03d", todo_idx), collapse = ", "))
+
+# ---------------- parrallel ----------------
+NUM_THREADS <- max(1, parallel::detectCores() - 2)  #
+message("ranger cores used：", NUM_THREADS)
+
+GTiff_OPTS <- c("TILED=YES", "BIGTIFF=YES", "COMPRESS=NONE")
+
+.safe_unlink <- function(fn) {
+  aux <- c(fn,
+           paste0(fn, ".aux.xml"),
+           paste0(fn, ".ovr"),
+           sub("\\.tif$", ".tfw", fn))
+  invisible(try(unlink(aux[file.exists(aux)], force = TRUE), silent = TRUE))
 }
 
-# Function to predict on chunks
-predict_chunk <- function(chunk, rf_model) {
-  # Write progress to file
-  progress_msg <- paste("Processing chunk with indices from", min(chunk$.__index__), 
-                        "to", max(chunk$.__index__), "at", Sys.time())
-  cat(progress_msg, "\n", file = "progress.txt", append = TRUE)
-  
-  na_rows <- apply(chunk, 1, function(x) any(is.na(x)))
-  
-  predictions <- rep(NA, nrow(chunk))
-  #se.fit <- rep(NA, nrow(chunk))
-  
-  if (any(!na_rows)) {
-    valid_predictions <- predict(rf_model, chunk[!na_rows,], type = "response")
-    predictions[!na_rows] <- valid_predictions$predictions[,2]
+.move_or_copy <- function(src, dst, max_try = 3, sleep_sec = 0.5) {
+  for (k in 1:max_try) {
+    .safe_unlink(dst)
+    ok <- try(file.rename(src, dst), silent = TRUE)
+    if (isTRUE(ok)) return(invisible(TRUE))
+    ok2 <- try(file.copy(src, dst, overwrite = TRUE), silent = TRUE)
+    if (isTRUE(ok2)) {
+      unlink(src, force = TRUE)
+      return(invisible(TRUE))
+    }
+    Sys.sleep(sleep_sec)
   }
-  
-  # Write completion to file
-  completion_msg <- paste("Completed chunk", min(chunk$.__index__), "-", 
-                          max(chunk$.__index__), "at", Sys.time())
-  cat(completion_msg, "\n", file = "progress.txt", append = TRUE)
-  
-  gc()
-  return(data.frame(index = chunk$.__index__, prob = predictions))
+  stop(sprintf("cannot move object to location：%s -> %s", src, dst))
 }
 
-# Create template raster
-template_raster <- raster("annual_prec_2020.tif")
+make_blocks <- function(r, target_blocks = 12) {
+  nr <- nrow(r)
+  n  <- max(1, min(target_blocks, nr))
+  base <- floor(nr / n)
+  extra <- nr %% n
+  nrows <- rep(base, n)
+  if (extra > 0) nrows[1:extra] <- nrows[1:extra] + 1
+  row <- cumsum(c(1, head(nrows, -1)))
+  data.frame(row = row, nrows = nrows, n = n)
+}
+bs <- make_blocks(template_raster, target_blocks = 12)
+ncols_tr <- ncol(template_raster)
 
-#---------- Bootstrap loop - 100 iterations -----------------------
-set.seed(123)  # For reproducibility
-bootstrap_seeds <- sample(1:10000, 100)  # Generate 100 different seeds
-
-for (boot_iter in 1:100) {
-  cat("Starting bootstrap iteration", boot_iter, "of 50 at", Sys.time(), "\n")
-  
-  # Set seed for this iteration
+# ---------------- main fucntion, run, prediction, write----------------
+for (boot_iter in todo_idx) {
+  cat("Starting CLUSTER bootstrap iteration", boot_iter, "of", TOTAL_ITERS, "at", Sys.time(), "\n")
   set.seed(bootstrap_seeds[boot_iter])
   
-  # Create balanced dataset by sampling from absence data
-  df_0_sampled <- df_0 %>% sample_n(nrow(df_1))
-  df_balanced <- bind_rows(df_0_sampled, df_1) %>% sample_frac(1)
+  unique_clusters_0 <- unique(df_0$cluster)
+  boot_clusters_0 <- sample(unique_clusters_0, size = length(unique_clusters_0), replace = TRUE)
+  df_0_sampled <- map_dfr(boot_clusters_0, function(clust) dplyr::filter(df_0, cluster == clust))
+  df_1_sampled <- df_1
   
-  # Convert to factor
+  df_balanced <- bind_rows(df_1_sampled, df_0_sampled)
   df_balanced$occurrence <- as.factor(df_balanced$occurrence)
   
-  # Create formula
   formula_rf <- as.formula(paste("occurrence ~", paste(predictors_names, collapse = " + ")))
   
-  # Train random forest model
-  rf.fit <- ranger(formula_rf,
-                   data = df_balanced,
-                   num.trees = 900,
-                   keep.inbag = TRUE,
-                   probability = TRUE,
-                   importance = 'impurity',
-                   case.weights = df_balanced$weight)
+  wts <- if ("weight" %in% names(df_balanced)) df_balanced$weight else rep(1, nrow(df_balanced))
+  rf.fit <- ranger(
+    formula_rf,
+    data         = df_balanced,
+    num.trees    = 900,
+    probability  = TRUE,
+    importance   = "impurity",
+    case.weights = wts,
+    num.threads  = NUM_THREADS,
+    keep.inbag   = FALSE
+  )
   
-  # Create progress file for this iteration
-  progress_file <- paste0("progress_boot_", boot_iter, ".txt")
-  if (file.exists(progress_file)) file.remove(progress_file)
+  # ====== output ======
+  out_fn  <- sprintf("RF_pred_bootstrap_%03d.tif", boot_iter)
+  .safe_unlink(out_fn)  
   
-  # Parallel prediction
-  clusterExport(cl, varlist = c("rf.fit", "predict_chunk"), envir = environment())
-  clusterEvalQ(cl, library(ranger))
-  
-  result <- parLapply(cl, data_chunks, function(chunk) predict_chunk(chunk, rf.fit))
-  
-  # Extract predictions
-  RF_predictions <- unlist(lapply(result, function(x) x$prob))
-  #RF_predictions_se <- unlist(lapply(result, function(x) x$se))
-  
-  # Create rasters
-  RF_raster <- template_raster
-  values(RF_raster) <- RF_predictions
-  
-  #se_raster <- template_raster
-  #values(se_raster) <- RF_predictions_se
-  
-  # Save rasters with bootstrap iteration number
-  writeRaster(RF_raster, 
-              filename = paste0("RF_pred_bootstrap_", sprintf("%03d", boot_iter), ".tif"), 
-              format = "GTiff", overwrite = TRUE)
-  #writeRaster(se_raster, 
-   #           filename = paste0("RF_pred_bootstrap_se_", sprintf("%03d", boot_iter), ".tif"), 
-    #          format = "GTiff", overwrite = TRUE)
-  
-  # Clean up memory
-  rm(rf.fit, RF_raster, RF_predictions,  result)
+  out_tmp <- tempfile(
+    pattern = sprintf("RF_pred_bootstrap_%03d_", boot_iter),
+    tmpdir  = tempdir(),
+    fileext = ".tif"
+  )
+  .safe_unlink(out_tmp)
+  try(raster::removeTmpFiles(h = 0), silent = TRUE)
   gc()
   
-  cat("Completed bootstrap iteration", boot_iter, "at", Sys.time(), "\n")
+  # ====== write ======
+  out_r <- NULL
+  tryCatch({
+    out_r <<- writeStart(template_raster, filename = out_tmp, format = "GTiff",
+                         options = GTiff_OPTS, overwrite = TRUE)
+  }, error = function(e) {
+    try(raster::removeTmpFiles(h = 0), silent = TRUE)
+    .safe_unlink(out_tmp)
+    out_r <<- writeStart(template_raster, filename = out_tmp, format = "GTiff",
+                         options = GTiff_OPTS, overwrite = TRUE)
+  })
+  
+  cat("Making block-wise predictions for bootstrap", boot_iter, "...\n")
+  for (i in seq_len(bs$n)) {
+    start_row <- bs$row[i]
+    nrows_blk <- bs$nrows[i]
+    cell_start <- (start_row - 1) * ncols_tr + 1
+    cell_end   <- (start_row + nrows_blk - 1) * ncols_tr
+    idx <- cell_start:cell_end
+    
+    pred_block_df <- prediction_data_full[idx, , drop = FALSE]
+    
+    pred_block <- predict(
+      rf.fit, data = pred_block_df, type = "response", num.threads = NUM_THREADS
+    )$predictions[, 2]
+    
+    out_r <- writeValues(out_r, pred_block, start_row)
+  }
+  
+  out_r <- writeStop(out_r)
+  
+  ok <- try(.move_or_copy(out_tmp, out_fn), silent = TRUE)
+  if (inherits(ok, "try-error")) {
+    Sys.sleep(0.5)
+    ok <- try(.move_or_copy(out_tmp, out_fn), silent = TRUE)
+    if (inherits(ok, "try-error")) {
+      stop("fail to move：", out_tmp, " -> ", out_fn)
+    }
+  }
+  cat("Saved", out_fn, "\n")
+  
+  rm(rf.fit, out_r, pred_block, pred_block_df); gc()
+  cat("Completed bootstrap iteration", boot_iter, "at", Sys.time(), "\n\n")
 }
 
-# Stop cluster
-stopCluster(cl)
+message("all the prediction done：")
+print(sort(list.files(pattern = "^RF_pred_bootstrap_\\d{3}\\.tif$")))
 
-cat("All 100 bootstrap iterations completed!\n")
-cat("Generated files:\n")
-cat("- RF_pred_bootstrap_001.tif to RF_pred_bootstrap_100.tif (predictions)\n")
+# ===================== everage and get the sd =====================
+library(raster)
+library(tidyverse)
 
-cat("Creating summary rasters...\n")
+# setwd("your/path/here")
 
-# Read all bootstrap prediction rasters
-bootstrap_stack <- stack(paste0("RF_pred_bootstrap_", sprintf("%03d", 1:100), ".tif"))
+pred_files <- list.files(pattern = "^RF_pred_bootstrap_\\d{3}\\.tif$")
+cat("Found", length(pred_files), "prediction files\n")
 
-# Calculate mean and standard deviation
-mean_prediction <- calc(bootstrap_stack, mean, na.rm = TRUE)
-#sd_prediction <- calc(bootstrap_stack, sd, na.rm = TRUE)
+pred_files <- pred_files[order(as.numeric(gsub("RF_pred_bootstrap_(\\d+)\\.tif", "\\1", pred_files)))]
 
-# Save summary rasters
-writeRaster(mean_prediction, "RF_pred_bootstrap_mean.tif", format = "GTiff", overwrite = TRUE)
-#writeRaster(sd_prediction, "RF_pred_bootstrap_sd.tif", format = "GTiff", overwrite = TRUE)
+if (length(pred_files) == 0) {
+  stop("No prediction files found!")
+}
 
-cat("Summary rasters created:\n")
-cat("- RF_pred_bootstrap_mean.tif (mean across 100 bootstrap iterations)\n")
+template <- raster(pred_files[1])
+n_layers <- length(pred_files)
+
+cat("Loading prediction rasters...\n")
+pred_stack <- stack()
+
+for (i in seq_along(pred_files)) {
+  cat("Loading:", pred_files[i], "(", i, "of", length(pred_files), ")\n")
+  pred_stack <- addLayer(pred_stack, raster(pred_files[i]))
+}
+
+cat("Calculating mean prediction...\n")
+mean_pred <- calc(pred_stack, fun = mean, na.rm = TRUE)
+
+cat("Calculating standard deviation...\n")
+sd_pred <- calc(pred_stack, fun = sd, na.rm = TRUE)
+
+cat("Saving results...\n")
+
+# save mean
+writeRaster(mean_pred, 
+           filename = "RF_pred_mean.tif",
+           format = "GTiff",
+           options = c("COMPRESS=LZW", "PREDICTOR=2"),
+           overwrite = TRUE)
+
+# save sd
+writeRaster(sd_pred,
+           filename = "RF_pred_sd.tif", 
+           format = "GTiff",
+           options = c("COMPRESS=LZW", "PREDICTOR=2"),
+           overwrite = TRUE)
+
+
+rm(pred_stack)
+gc()
+
+cat("All done! Created:\n")
+cat("- RF_pred_mean.tif (平均预测)\n") 
+cat("- RF_pred_sd.tif (预测标准差)\n")
+
